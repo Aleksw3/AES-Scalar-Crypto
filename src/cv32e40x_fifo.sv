@@ -12,7 +12,7 @@
 
 // Copy of fifo_v3 from https://github.com/pulp-platform/common_cells b2a4b2d3decdfc152ad9b4564a48ed3b2649fd6c
 
-module cv32e40x_fifo import cv32e40x_pkg::*;
+module cv32e40x_fifo import aes_pkg::*;
 #(
     parameter bit          FALL_THROUGH = 1'b0,  // fifo is in fall-through mode
     parameter int unsigned DEPTH        = 8,     // depth can be arbitrary from 0 to 2**32

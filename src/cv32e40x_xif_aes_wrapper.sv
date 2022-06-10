@@ -1,4 +1,4 @@
-module cv32e40x_xif_aes_wrapper import cv32e40x_pkg::*;
+module xif_aes_wrapper import aes_pkg::*;
 #(
   parameter int          X_ID_WIDTH      =  4,  // Width of ID field.
   parameter int          X_RFR_WIDTH     =  32, // Register file read access width for the eXtension interface
