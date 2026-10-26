@@ -1,7 +1,8 @@
 package aes_pkg;
 
 // AES Instructions
-parameter AES_OPCODE_WIDTH = 6;
+parameter AES_OPCODE_WIDTH = 7;
+parameter AES_FUNC3_WIDTH  = 3;
 parameter AES_FUNC_WIDTH   = 5;
 
 typedef enum logic [AES_FUNC_WIDTH-1:0] {
@@ -12,14 +13,9 @@ typedef enum logic [AES_FUNC_WIDTH-1:0] {
 } aes_func5_e;
 
 typedef enum logic [AES_OPCODE_WIDTH-1:0] {
-  AES32 = 6'b110011
+  AES32 = 7'b0110011
 } aes_opcode_e;
 
-typedef struct packed {
-    logic [3:0] instr_id;
-    logic [4:0] rd_adr;
-    logic kill;
-} id_rd_packet_t;
-
+parameter logic [AES_FUNC3_WIDTH-1:0] AES32_FUNC3 = 3'b000;
 
 endpackage

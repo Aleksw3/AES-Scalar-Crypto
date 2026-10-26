@@ -38,17 +38,12 @@ logic [17:0] randombits;
 assign decrypt_i      = op_saes32_decs  || op_saes32_decsm;
 assign middle_round_i = op_saes32_decsm || op_saes32_encsm;
 
-/*//? [1]
-It is possible to encrypt and decrypt using the the original implementation where the indeces of the bytes are flipped and the word is not rotated at the end,
-however, this does not produce the same result as in the standard. Thus, another implementation would not be able to decrypt the message if it is not using the same
-implementation as we do. 
-We are, therefore, using the approach that produce the same results as the standard expects.
-*/
+// Byte selection and rotation follow the RISC-V Zkne/Zknd aes32 definition
 wire [7:0] bytes_in_shareA [3:0];
-assign bytes_in_shareA[3] = rs2_i[ 7: 0];
-assign bytes_in_shareA[2] = rs2_i[15: 8];
-assign bytes_in_shareA[1] = rs2_i[23:16];
-assign bytes_in_shareA[0] = rs2_i[31:24];
+assign bytes_in_shareA[0] = rs2_i[ 7: 0];
+assign bytes_in_shareA[1] = rs2_i[15: 8];
+assign bytes_in_shareA[2] = rs2_i[23:16];
+assign bytes_in_shareA[3] = rs2_i[31:24];
 
 logic [7:0] byte_sel_shareA;
 assign byte_sel_shareA = bytes_in_shareA[bs_i];
@@ -106,21 +101,18 @@ wire [31:0] result_mix_shareB  = {mix_b3_shareB, mix_b2_shareB, mix_b1_shareB, m
 wire [31:0] result_shareB      = middle_round_o ? result_mix_shareB : {24'b0, sub_byte_shareB};
 
 
-wire [31:0] rotated_shareA_tmp     =
-    {32{bs_o == 2'b00}} & {result_shareA                             } |
-    {32{bs_o == 2'b01}} & {result_shareA[23:0], result_shareA[31:24] } |
-    {32{bs_o == 2'b10}} & {result_shareA[15:0], result_shareA[31:16] } |
-    {32{bs_o == 2'b11}} & {result_shareA[ 7:0], result_shareA[31: 8] } ;
-//? Ref comment [1]
-wire [31:0] rotated_shareA = {rotated_shareA_tmp[7:0], rotated_shareA_tmp[15:8], rotated_shareA_tmp[23:16], rotated_shareA_tmp[31:24]};
+wire [31:0] rotated_shareA     =
+    ({32{bs_o == 2'b00}} & {result_shareA                             }) |
+    ({32{bs_o == 2'b01}} & {result_shareA[23:0], result_shareA[31:24] }) |
+    ({32{bs_o == 2'b10}} & {result_shareA[15:0], result_shareA[31:16] }) |
+    ({32{bs_o == 2'b11}} & {result_shareA[ 7:0], result_shareA[31: 8] }) ;
 
 
-wire [31:0] rotated_shareB_tmp     =
-    {32{bs_o == 2'b00}} & {result_shareB                             } |
-    {32{bs_o == 2'b01}} & {result_shareB[23:0], result_shareB[31:24] } |
-    {32{bs_o == 2'b10}} & {result_shareB[15:0], result_shareB[31:16] } |
-    {32{bs_o == 2'b11}} & {result_shareB[ 7:0], result_shareB[31: 8] } ;
-wire [31:0] rotated_shareB = {rotated_shareB_tmp[7:0], rotated_shareB_tmp[15:8], rotated_shareB_tmp[23:16], rotated_shareB_tmp[31:24]};
+wire [31:0] rotated_shareB     =
+    ({32{bs_o == 2'b00}} & {result_shareB                             }) |
+    ({32{bs_o == 2'b01}} & {result_shareB[23:0], result_shareB[31:24] }) |
+    ({32{bs_o == 2'b10}} & {result_shareB[15:0], result_shareB[31:16] }) |
+    ({32{bs_o == 2'b11}} & {result_shareB[ 7:0], result_shareB[31: 8] }) ;
 
 assign add_round_key_shareA = rotated_shareA ^ rs1_o;
 assign result_o = add_round_key_shareA ^ rotated_shareB;
@@ -128,7 +120,7 @@ assign result_o = add_round_key_shareA ^ rotated_shareB;
 logic sbox_ready;
 logic sbox_valid_o, aes_ready_o;
 logic valid_input, decrypt, middle_round;
-logic [31:0] rs1, rs2;
+logic [31:0] rs1;
 logic [7: 0] shareB_mask, shareA_masked; 
 logic [1: 0] bs;
 logic [X_ID_WIDTH-1:0] instr_id;
@@ -141,29 +133,27 @@ always_ff @( posedge clk_i, negedge rst_n )
 begin : AES_INPUT_REGISTERS
     if(!rst_n)
     begin
-        valid_input   = 'b0;
-        rs2           = 'b0;
-        rs1           = 'b0;
-        bs            = 'b0;
-        shareA_masked = 'b0;
-        shareB_mask   = 'b0;
-        randombits    = 'b0;
-        instr_id      = 'b0;
-        decrypt       = 'b0;
-        middle_round  = 'b0;
+        valid_input   <= 'b0;
+        rs1           <= 'b0;
+        bs            <= 'b0;
+        shareA_masked <= 'b0;
+        shareB_mask   <= 'b0;
+        randombits    <= 'b0;
+        instr_id      <= 'b0;
+        decrypt       <= 'b0;
+        middle_round  <= 'b0;
     end else begin
         if(sbox_ready || !valid_input) 
         begin
-            valid_input   = valid_i;
-            rs2           = rs2_i;
-            rs1           = rs1_i;
-            bs            = bs_i;
-            shareA_masked = shareA_masked_i;
-            shareB_mask   = shareB_mask_i;
-            randombits    = randombits_i[25:8];
-            instr_id      = instr_id_i;
-            decrypt       = decrypt_i;
-            middle_round  = middle_round_i;
+            valid_input   <= valid_i;
+            rs1           <= rs1_i;
+            bs            <= bs_i;
+            shareA_masked <= shareA_masked_i;
+            shareB_mask   <= shareB_mask_i;
+            randombits    <= randombits_i[25:8];
+            instr_id      <= instr_id_i;
+            decrypt       <= decrypt_i;
+            middle_round  <= middle_round_i;
         end
     end    
 end
@@ -203,4 +193,4 @@ i_aes_dom_sbox
     .shareB_out(sub_byte_shareB)
 );
 
-endmodule
+endmodule  // riscv_crypto_fu_saes32_protected

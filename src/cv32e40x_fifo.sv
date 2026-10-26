@@ -12,10 +12,10 @@
 
 // Copy of fifo_v3 from https://github.com/pulp-platform/common_cells b2a4b2d3decdfc152ad9b4564a48ed3b2649fd6c
 
-module cv32e40x_fifo import aes_pkg::*;
-#(
+module cv32e40x_fifo #(
     parameter bit          FALL_THROUGH = 1'b0,  // fifo is in fall-through mode
     parameter int unsigned DEPTH        = 8,     // depth can be arbitrary from 0 to 2**32
+    parameter type         dtype        = logic,
 
     // DO NOT OVERWRITE THIS PARAMETER
     parameter int unsigned ADDR_DEPTH = (DEPTH > 1) ? $clog2(DEPTH) : 1
@@ -32,11 +32,11 @@ module cv32e40x_fifo import aes_pkg::*;
     output logic [ADDR_DEPTH:0] cnt_o,  // FIFO counter
     
     // as long as the queue is not full we can push new data
-    input id_rd_packet_t data_i,    // data to push into the queue
+    input dtype data_i,             // data to push into the queue
     input logic push_i,             // data is valid and can be pushed to the queue
     
     // as long as the queue is not empty we can pop new elements
-    output id_rd_packet_t data_o,   // output data
+    output dtype data_o,            // output data
     input logic pop_i               // pop head from queue
 );
 
@@ -51,7 +51,7 @@ module cv32e40x_fifo import aes_pkg::*;
   logic [ADDR_DEPTH:0]
       status_cnt_n, status_cnt_q;  // this integer will be truncated by the synthesis tool
   // actual memory
-  id_rd_packet_t [FIFO_DEPTH - 1:0] mem_n, mem_q;
+  dtype [FIFO_DEPTH - 1:0] mem_n, mem_q;
 
   assign cnt_o = status_cnt_q;
 
@@ -170,4 +170,4 @@ module cv32e40x_fifo import aes_pkg::*;
   else $fatal(1, "Trying to pop data although the FIFO is empty.");
 `endif
 
-endmodule  // cv32e40p_fifo
+endmodule  // cv32e40x_fifo

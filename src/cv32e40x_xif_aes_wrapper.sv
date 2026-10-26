@@ -4,8 +4,8 @@ module xif_aes_wrapper import aes_pkg::*;
   parameter int          X_RFR_WIDTH     =  32, // Register file read access width for the eXtension interface
   parameter logic [ 1:0] X_ECS_XS        =  '0, // Default value for mstatus.XS
   parameter int          PROTECTED       =   1,
-  parameter int          PIPELINE_STAGES =   5 //Number of instructions wrapper can hold
-  
+  parameter int          PIPELINE_STAGES =   5, //Number of instructions wrapper can hold
+
   // DONT MODIFY
   parameter int unsigned ADDR_DEPTH = (PIPELINE_STAGES > 1) ? $clog2(PIPELINE_STAGES) : 1
 )
@@ -18,16 +18,18 @@ module xif_aes_wrapper import aes_pkg::*;
   if_xif.coproc_commit      xif_commit,        // Commit Interface
   if_xif.coproc_result      xif_result         // Result interface
 );
-    //Output logic
-    logic enable_output_registers;
-    logic ready_for_aes_output;
-
+    typedef struct packed {
+        logic [X_ID_WIDTH-1:0] instr_id;
+        logic [4:0] rd_adr;
+        logic kill;
+    } id_rd_packet_t;
 
     //OUTPUT logic
+    logic ready_for_aes_output;
     logic wrapper_output_valid;
+    logic output_committed, output_retire;
 
     //FIFO accept
-    logic fifo_flush, fifo_flush_but_first, test_mode;
     logic fifo_full_acc_instr, fifo_empty_acc_instr;
     logic fifo_push_acc_instr, fifo_pop_acc_instr;
     id_rd_packet_t fifo_data_push_acc_instr_i;
@@ -35,44 +37,116 @@ module xif_aes_wrapper import aes_pkg::*;
     logic [ADDR_DEPTH:0] fifo_cnt_acc_instr;
 
     // FIFO commit
-    logic id_match;
+    logic commit_matches_accepted, commit_matches_issue;
 
     logic fifo_full_commit, fifo_empty_commit;
     logic fifo_push_commit, fifo_pop_commit;
+    id_rd_packet_t fifo_data_push_commit_i;
     id_rd_packet_t fifo_data_pop_commit_o;
     logic [ADDR_DEPTH:0] fifo_cnt_commit;
 
     // Input logic
-    logic valid_i, decrypt_i, encrypt_i, decrypt_middle_i, encrypt_middle_i;
-    logic [X_ID_WIDTH-1:0]  aes_instr_id_o, instr_id_i;
-    logic [X_RFR_WIDTH-1:0]  instr_i, result_aes_o;
+    logic decrypt_i, encrypt_i, decrypt_middle_i, encrypt_middle_i;
+    logic [X_ID_WIDTH-1:0]  aes_instr_id_o;
+    logic [X_RFR_WIDTH-1:0] result_aes_o;
     logic [25:0] randombits;
 
     //Valid and ready for input and output
     logic valid_aes_input,  ready_aes_input;
-    logic valid_aes_output, ready_aes_output;
+    logic valid_aes_output;
     logic issue_ready;
+    logic is_aes_instr, operands_valid, wrapper_has_space;
 
     //Instruction information
     logic [4:0] xif_rd_adr;
     logic [6:0] xif_opcode;
+    logic [2:0] xif_func3;
+    logic [4:0] xif_func5;
     logic [1:0] xif_byte_select;
 
-    assign randombits = 32'h02;
+    assign randombits = 26'h02;
+
+    // Data taken from the instruction itself
+    assign xif_byte_select = xif_issue.issue_req.instr[31:30];
+    assign xif_func5       = xif_issue.issue_req.instr[29:25];
+    assign xif_func3       = xif_issue.issue_req.instr[14:12];
+    assign xif_rd_adr      = xif_issue.issue_req.instr[11: 7];
+    assign xif_opcode      = xif_issue.issue_req.instr[ 6: 0];
+
+    always_comb
+    begin : DECODE_AES_INSTR
+        decrypt_i        = 1'b0;
+        decrypt_middle_i = 1'b0;
+        encrypt_i        = 1'b0;
+        encrypt_middle_i = 1'b0;
+        case(aes_func5_e'(xif_func5))
+            AES32DSI:  decrypt_i        = 1'b1;
+            AES32DSMI: decrypt_middle_i = 1'b1;
+            AES32ESI:  encrypt_i        = 1'b1;
+            AES32ESMI: encrypt_middle_i = 1'b1;
+            default: ;
+        endcase
+    end
+
+    assign is_aes_instr = (xif_opcode == AES32) && (xif_func3 == AES32_FUNC3) &&
+                          (decrypt_i || decrypt_middle_i || encrypt_i || encrypt_middle_i);
+
+    assign operands_valid    = xif_issue.issue_req.rs_valid[0] && xif_issue.issue_req.rs_valid[1];
+    assign wrapper_has_space = (fifo_cnt_acc_instr + fifo_cnt_commit) < PIPELINE_STAGES;
+
+    // Instructions that are not AES are rejected right away. AES instructions are held
+    // until both operands are valid and the wrapper can track one more instruction.
+    assign issue_ready     = !is_aes_instr || (operands_valid && ready_aes_input && wrapper_has_space);
+    assign valid_aes_input = xif_issue.issue_valid && issue_ready && is_aes_instr;
 
     //XIF Issue interface
     assign xif_issue.issue_ready = issue_ready;
-    assign issue_ready = !valid_aes_input || ready_aes_input;
-
 
     // XIF issue interface response
-    assign xif_issue.issue_resp.accept    = valid_aes_input;
-    assign xif_issue.issue_resp.writeback = 'b1;
+    assign xif_issue.issue_resp.accept    = is_aes_instr;
+    assign xif_issue.issue_resp.writeback = is_aes_instr;
     assign xif_issue.issue_resp.dualwrite = 'b0;
     assign xif_issue.issue_resp.dualread  = 'b0;
     assign xif_issue.issue_resp.loadstore = 'b0;
     assign xif_issue.issue_resp.ecswrite  = 'b0;
     assign xif_issue.issue_resp.exc       = 'b0;
+
+    //Push data into accept instruction FIFO
+    assign fifo_data_push_acc_instr_i = '{instr_id: xif_issue.issue_req.id, rd_adr: xif_rd_adr, kill: 1'b0};
+
+    // Commits arrive in program order, so a commit can only belong to the oldest accepted
+    // instruction, or to the instruction being issued in the same cycle when none is waiting.
+    always_comb
+    begin : COMMIT_FIFO_LOGIC
+        commit_matches_accepted = 1'b0;
+        commit_matches_issue    = 1'b0;
+
+        if(xif_commit.commit_valid) begin
+            if(!fifo_empty_acc_instr)
+                commit_matches_accepted = fifo_data_pop_acc_instr_o.instr_id == xif_commit.commit.id;
+            else
+                commit_matches_issue    = valid_aes_input && (xif_issue.issue_req.id == xif_commit.commit.id);
+        end
+
+        fifo_push_acc_instr = valid_aes_input && !commit_matches_issue;
+        fifo_pop_acc_instr  = commit_matches_accepted;
+        fifo_push_commit    = commit_matches_accepted || commit_matches_issue;
+
+        fifo_data_push_commit_i      = commit_matches_issue ? fifo_data_push_acc_instr_i : fifo_data_pop_acc_instr_o;
+        fifo_data_push_commit_i.kill = xif_commit.commit.commit_kill;
+    end
+
+    // The AES pipeline is in order, so the instruction at its output is the oldest one in
+    // flight. It may only leave the pipeline once it has been committed.
+    always_comb
+    begin : OUTPUT_STAGE_LOGIC
+        output_committed     = valid_aes_output && !fifo_empty_commit;
+        wrapper_output_valid = output_committed && !fifo_data_pop_commit_o.kill;
+        output_retire        = output_committed && (fifo_data_pop_commit_o.kill || xif_result.result_ready);
+
+        fifo_pop_commit      = output_retire;
+        ready_for_aes_output = !valid_aes_output || output_retire;
+    end
 
     // XIF result interface
     assign xif_result.result_valid   = wrapper_output_valid;
@@ -86,82 +160,6 @@ module xif_aes_wrapper import aes_pkg::*;
     assign xif_result.result.exccode =  '0;
 
 
-    // Data taken from the instruction itself
-    assign xif_byte_select = xif_issue.issue_req.instr[31:30];
-    assign xif_rd_adr      = xif_issue.issue_req.instr[11: 7];
-    assign xif_opcode      = xif_issue.issue_req.instr[ 6: 0];
-
-
-    //Push data into accept instruction FIFO
-    assign fifo_data_push_acc_instr_i = {xif_issue.issue_req.id, xif_rd_adr, 1'b0};
-    assign fifo_push_acc_instr        = valid_aes_input;
-
-    always_comb 
-    begin : ACCEPT_INSTRUCTION
-        valid_aes_input = 'b0;
-
-        if(xif_opcode == AES32) begin
-            if(xif_issue.issue_valid && issue_ready && (xif_issue.issue_req.rs_valid[0] && xif_issue.issue_req.rs_valid[1]))
-                valid_aes_input = 'b1;
-        end    
-    end
-
-    always_comb
-    begin : ONEHOT_AES_INSTR_TYPE
-        decrypt_i        = 1'b0;
-        decrypt_middle_i = 1'b0;
-        encrypt_i        = 1'b0;
-        encrypt_middle_i = 1'b0;
-        unique case(xif_issue.issue_req.instr[29:25])
-            AES32DSI:  decrypt_i        = 1'b1;
-            AES32DSMI: decrypt_middle_i = 1'b1;
-            AES32ESI:  encrypt_i        = 1'b1;
-            AES32ESMI: encrypt_middle_i = 1'b1;
-            default:  encrypt_middle_i  = 1'b0; //Removes simulation warning
-        endcase
-    end
-
-
-    always_comb 
-    begin : COMMIT_FIFO_LOGIC
-        fifo_push_commit    = 1'b0;
-        id_match            = 1'b0; 
-        fifo_pop_acc_instr  = 1'b0;
-
-        if(!fifo_empty_acc_instr)
-            if(fifo_data_pop_acc_instr_o.instr_id == xif_commit.commit.id)
-                id_match = 'b1;
-
-        if(xif_commit.commit_valid && id_match) begin
-            fifo_push_commit   = 1'b1;
-            fifo_pop_acc_instr = 1'b1;
-        end
-    end
-
-    logic id_match_output;
-    logic pop_commit_fifo;
-    assign pop_commit_fifo = id_match_output;
-
-    always_comb 
-    begin : OUTPUT_STAGE_LOGIC
-        // Accept new data in output stage?
-        ready_for_aes_output = 1'b0;
-        wrapper_output_valid = 1'b0;
-        id_match_output      = 1'b0;
-
-        if(aes_instr_id_o == fifo_data_pop_commit_o.instr_id)
-            id_match_output = 1'b1;
-
-        if(id_match_output && valid_aes_output && !fifo_data_pop_commit_o.kill)
-            wrapper_output_valid = 1'b1;
-
-        // Is output stage ready for new output            
-        if(!wrapper_output_valid || xif_result.result_ready )
-            ready_for_aes_output = 1'b1;
-    end
-
-
-
         riscv_crypto_fu_saes32_protected
         #(
             .X_ID_WIDTH(X_ID_WIDTH)
@@ -173,8 +171,8 @@ module xif_aes_wrapper import aes_pkg::*;
             .valid_i(valid_aes_input)           ,
             .ready_i(ready_aes_input)           ,
 
-            .rs1_i(xif_issue.issue_req.rs[0])   , 
-            .rs2_i(xif_issue.issue_req.rs[1])   , 
+            .rs1_i(xif_issue.issue_req.rs[0])   ,
+            .rs2_i(xif_issue.issue_req.rs[1])   ,
             .randombits_i(randombits)           ,
             .instr_id_i(xif_issue.issue_req.id) ,
             .bs_i(xif_byte_select)              ,
@@ -191,24 +189,17 @@ module xif_aes_wrapper import aes_pkg::*;
         );
 
 
-
-//Reassign commit kill signal for commit instruction FIFO
-id_rd_packet_t accept_commit_kill;
-assign accept_commit_kill.rd_adr   = fifo_data_pop_acc_instr_o.rd_adr;
-assign accept_commit_kill.instr_id = fifo_data_pop_acc_instr_o.instr_id;
-assign accept_commit_kill.kill     = xif_commit.commit.commit_kill;
-
-
 cv32e40x_fifo #(
-     .DEPTH(1)
+     .DEPTH(PIPELINE_STAGES),
+     .dtype(id_rd_packet_t)
 )
 accepted_instruction_fifo_i
 (
-    .clk_i(clk_i),  
-    .rst_ni(rst_n),  
-    .flush_i(fifo_flush),
-    .flush_but_first_i(fifo_flush_but_first),
-    .testmode_i(test_mode),
+    .clk_i(clk_i),
+    .rst_ni(rst_n),
+    .flush_i(1'b0),
+    .flush_but_first_i(1'b0),
+    .testmode_i(1'b0),
 
     .full_o(fifo_full_acc_instr),
     .empty_o(fifo_empty_acc_instr),
@@ -222,27 +213,28 @@ accepted_instruction_fifo_i
 );
 
 cv32e40x_fifo #(
-     .DEPTH(PIPELINE_STAGES)
+     .DEPTH(PIPELINE_STAGES),
+     .dtype(id_rd_packet_t)
 )
 commited_instruction_fifo_i
 (
     .clk_i(clk_i),
     .rst_ni(rst_n),
-    .flush_i(fifo_flush),
-    .flush_but_first_i(fifo_flush_but_first),
-    .testmode_i(test_mode), 
+    .flush_i(1'b0),
+    .flush_but_first_i(1'b0),
+    .testmode_i(1'b0),
 
     .full_o(fifo_full_commit),
     .empty_o(fifo_empty_commit),
     .cnt_o(fifo_cnt_commit),
 
-    .data_i(accept_commit_kill),
+    .data_i(fifo_data_push_commit_i),
     .push_i(fifo_push_commit),
 
     .data_o(fifo_data_pop_commit_o),
-    .pop_i(pop_commit_fifo)                
+    .pop_i(fifo_pop_commit)
 );
 
 
 
-endmodule  // cv32e40x_xif_aes_wrapper
+endmodule  // xif_aes_wrapper
